@@ -5,7 +5,7 @@
 #
 # Licensed under the Uber Non-Commercial License (the "License");
 # you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at the root directory of this project. 
+# You may obtain a copy of the License at the root directory of this project.
 #
 # See the License for the specific language governing permissions and
 # limitations under the License.
@@ -23,7 +23,7 @@ from upsnet.models.resnet import get_params, resnet_rcnn, ResNetBackbone
 from upsnet.models.fpn import FPN
 from upsnet.models.rpn import RPN, RPNLoss
 from upsnet.models.rcnn import RCNN, MaskBranch, RCNNLoss, MaskRCNNLoss
-from upsnet.models.fcn import FCNHead
+from upsnet.models.fcn import FCNHead, DistillationLoss
 from upsnet.operators.modules.pyramid_proposal import PyramidProposal
 from upsnet.operators.modules.proposal_mask_target import ProposalMaskTarget
 from upsnet.operators.modules.mask_roi import MaskROI
@@ -33,7 +33,7 @@ from upsnet.operators.modules.mask_matching import MaskMatching
 
 
 class resnet_upsnet(resnet_rcnn):
-    
+
     def __init__(self, backbone_depth):
         super(resnet_upsnet, self).__init__()
 
@@ -44,18 +44,18 @@ class resnet_upsnet(resnet_rcnn):
         # backbone net
         self.resnet_backbone = ResNetBackbone(backbone_depth)
         # FPN, RPN, Instance Head and Semantic Head
-        self.fpn = FPN(feature_dim=config.network.fpn_feature_dim, with_norm=config.network.fpn_with_norm,
-                        upsample_method=config.network.fpn_upsample_method)
+        #self.fpn = FPN(feature_dim=config.network.fpn_feature_dim, with_norm=config.network.fpn_with_norm,
+                        #upsample_method=config.network.fpn_upsample_method)
         self.rpn =  RPN(num_anchors=config.network.num_anchors, input_dim=config.network.fpn_feature_dim)
-        self.rcnn = RCNN(self.num_classes, self.num_reg_classes, dim_in=config.network.fpn_feature_dim, 
+        self.rcnn = RCNN(self.num_classes, self.num_reg_classes, dim_in=config.network.fpn_feature_dim,
                          with_norm=config.network.rcnn_with_norm)
         self.mask_branch = MaskBranch(self.num_classes, dim_in=config.network.fpn_feature_dim,
                                       with_norm=config.network.rcnn_with_norm)
-        self.fcn_head = eval(config.network.fcn_head)(config.network.fpn_feature_dim, self.num_seg_classes, 
+        self.fcn_head = eval(config.network.fcn_head)(config.network.fpn_feature_dim, self.num_seg_classes,
                                                       num_layers=config.network.fcn_num_layers,
                                                       with_norm=config.network.fcn_with_norm, upsample_rate=4,
                                                       with_roi_loss=config.train.fcn_with_roi_loss)
-        self.mask_roi = MaskROI(clip_boxes=True, bbox_class_agnostic=False, top_n=config.test.max_det, 
+        self.mask_roi = MaskROI(clip_boxes=True, bbox_class_agnostic=False, top_n=config.test.max_det,
                                 num_classes=self.num_classes, score_thresh=config.test.score_thresh)
 
         # Panoptic Head
@@ -63,7 +63,7 @@ class resnet_upsnet(resnet_rcnn):
         self.box_keep_fraction = config.train.panoptic_box_keep_fraction
         self.enable_void = config.train.panoptic_box_keep_fraction < 1
 
-        self.mask_roi_panoptic = MaskROI(clip_boxes=True, bbox_class_agnostic=False, top_n=config.test.max_det, 
+        self.mask_roi_panoptic = MaskROI(clip_boxes=True, bbox_class_agnostic=False, top_n=config.test.max_det,
                                          num_classes=self.num_classes, nms_thresh=0.5, class_agnostic=True, score_thresh=config.test.panoptic_score_thresh)
         self.mask_removal = MaskRemoval(fraction_threshold=0.3)
         self.seg_term = SegTerm(config.dataset.num_seg_classes)
@@ -73,7 +73,7 @@ class resnet_upsnet(resnet_rcnn):
         # # Loss layer
         self.rpn_loss = RPNLoss(config.train.rpn_batch_size * config.train.batch_size)
         self.mask_rcnn_loss = MaskRCNNLoss(config.train.batch_rois * config.train.batch_size)
-        self.fcn_loss = nn.CrossEntropyLoss(ignore_index=255)
+        self.fcn_loss = DistillationLoss() #nn.CrossEntropyLoss(ignore_index=255)
         self.panoptic_loss = nn.CrossEntropyLoss(ignore_index=255, reduce=False)
         if config.train.fcn_with_roi_loss:
             self.fcn_roi_loss = nn.CrossEntropyLoss(ignore_index=255, reduce=False)
@@ -85,10 +85,10 @@ class resnet_upsnet(resnet_rcnn):
     def forward(self, data, label=None):
 
         res2, res3, res4, res5 = self.resnet_backbone(data['data'])
-        fpn_p2, fpn_p3, fpn_p4, fpn_p5, fpn_p6 = self.fpn(res2, res3, res4, res5)
+        # res2, res3, res4, res5, = self.fpn(res2, res3, res4, res5)
 
         rpn_cls_score, rpn_cls_prob, rpn_bbox_pred = [], [], []
-        for feat in [fpn_p2, fpn_p3, fpn_p4, fpn_p5, fpn_p6]:
+        for feat in [res2, res3, res4, res5]:
             rpn_cls_score_p, rpn_bbox_pred_p, rpn_cls_prob_p = self.rpn(feat)
             rpn_cls_score.append(rpn_cls_score_p)
             rpn_cls_prob.append(rpn_cls_prob_p)
@@ -115,9 +115,9 @@ class resnet_upsnet(resnet_rcnn):
         if label is not None and config.train.fcn_with_roi_loss:
             fcn_rois, _ = self.get_gt_rois(label['roidb'], data['im_info'])
             fcn_rois = fcn_rois.to(rois.device)
-            fcn_output = self.fcn_head(*[fpn_p2, fpn_p3, fpn_p4, fpn_p5, fcn_rois])
+            fcn_output = self.fcn_head(*[res2, res3, res4, res5, fcn_rois])
         else:
-            fcn_output = self.fcn_head(*[fpn_p2, fpn_p3, fpn_p4, fpn_p5])
+            fcn_output = self.fcn_head(*[res2, res3, res4, res5])
 
         if label is not None:
 
@@ -131,9 +131,9 @@ class resnet_upsnet(resnet_rcnn):
                 fcn_roi_loss = fcn_roi_loss.mean()
 
             # Instance head loss
-            rcnn_output = self.rcnn([fpn_p2, fpn_p3, fpn_p4, fpn_p5], rois)
+            rcnn_output = self.rcnn([res2, res3, res4, res5], rois)
             cls_score, bbox_pred = rcnn_output['cls_score'], rcnn_output['bbox_pred']
-            mask_score = self.mask_branch([fpn_p2, fpn_p3, fpn_p4, fpn_p5], mask_rois)
+            mask_score = self.mask_branch([res2, res3, res4, res5], mask_rois)
             cls_loss, bbox_loss, mask_loss, rcnn_acc = \
                 self.mask_rcnn_loss(cls_score, bbox_pred, mask_score,
                                     cls_label, bbox_target, bbox_inside_weight, bbox_outside_weight, mask_target)
@@ -149,7 +149,7 @@ class resnet_upsnet(resnet_rcnn):
             gt_rois, cls_idx = gt_rois.to(rois.device), cls_idx.to(rois.device)
 
             # Calc mask logits with gt rois
-            mask_score = self.mask_branch([fpn_p2, fpn_p3, fpn_p4, fpn_p5], gt_rois)
+            mask_score = self.mask_branch([res2, res3, res4, res5], gt_rois)
             mask_score = mask_score.gather(1, cls_idx.view(-1, 1, 1, 1).expand(-1, -1, config.network.mask_size, config.network.mask_size))
 
             # Calc panoptic logits
@@ -163,7 +163,7 @@ class resnet_upsnet(resnet_rcnn):
             else:
                 panoptic_logits = torch.cat([seg_logits, (seg_inst_logits + mask_logits)], dim=1)
 
-            # generate gt for panoptic head 
+            # generate gt for panoptic head
             with torch.no_grad():
                 if self.enable_void:
                     panoptic_gt = self.mask_matching(label['seg_gt_4x'], label['mask_gt'], keep_inds=keep_inds)
@@ -194,12 +194,12 @@ class resnet_upsnet(resnet_rcnn):
         else:
 
 
-            rcnn_output = self.rcnn([fpn_p2, fpn_p3, fpn_p4, fpn_p5], rois)
+            rcnn_output = self.rcnn([res2, res3, res4, res5], rois)
             cls_score, bbox_pred = rcnn_output['cls_score'], rcnn_output['bbox_pred']
             cls_prob = F.softmax(cls_score, dim=1)
 
             cls_prob_all, mask_rois, cls_idx = self.mask_roi(rois, bbox_pred, cls_prob, data['im_info'])
-            mask_score = self.mask_branch([fpn_p2, fpn_p3, fpn_p4, fpn_p5], mask_rois)
+            mask_score = self.mask_branch([res2, res3, res4, res5], mask_rois)
             mask_prob = torch.sigmoid(mask_score)
 
             # get mask rcnn output (optional)
@@ -213,7 +213,7 @@ class resnet_upsnet(resnet_rcnn):
 
             # get mask_logits
             cls_prob, mask_rois, cls_idx = self.mask_roi_panoptic(rois, bbox_pred, cls_prob, data['im_info'])
-            mask_score = self.mask_branch([fpn_p2, fpn_p3, fpn_p4, fpn_p5], mask_rois)
+            mask_score = self.mask_branch([res2, res3, res4, res5], mask_rois)
             mask_score = mask_score.gather(1, cls_idx.view(-1, 1, 1, 1).expand(-1, -1, config.network.mask_size, config.network.mask_size))
 
             # get panoptic logits
@@ -224,7 +224,7 @@ class resnet_upsnet(resnet_rcnn):
             seg_logits, seg_inst_logits = self.seg_term(cls_idx, fcn_output['fcn_output'], mask_rois * 4.0)
 
             results.update({
-                'panoptic_cls_inds': cls_idx, 
+                'panoptic_cls_inds': cls_idx,
                 'panoptic_cls_probs': cls_prob
             })
 

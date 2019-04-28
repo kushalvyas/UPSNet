@@ -5,7 +5,7 @@
 #
 # Licensed under the Uber Non-Commercial License (the "License");
 # you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at the root directory of this project. 
+# You may obtain a copy of the License at the root directory of this project.
 #
 # See the License for the specific language governing permissions and
 # limitations under the License.
@@ -68,7 +68,7 @@ class FCNSubNet(nn.Module):
                     m.bias.data.fill_(0)
 
     def forward(self, x):
-        for i in range(self.num_layers):        
+        for i in range(self.num_layers):
             x = self.conv[i](x)
         return x
 
@@ -112,6 +112,54 @@ class FCNHead(nn.Module):
         nn.init.normal_(self.score.weight.data, 0, 0.01)
         self.score.bias.data.zero_()
 
+import torch.nn.functional as F
+class DistillationLoss(nn.Module):
+    def __init__(self, size_average=True, ignore_label=255, lambda_val=10):
+        super(DistillationLoss, self).__init__()
+        self.lambda = lambda_val
+        self.size_average = size_average
+        self.ignore_label = ignore_label
+        # self.kl = nn.KLDivLoss(size_average=True)
+        self.cs = nn.CosineSimilarity(dim=1)
+        # self.mse = nn.MSELoss(size_average=False, reduce=True)
+
+
+    def forward(self, student_dict, teacher_dict, target):
+        student_feat = student_dict['fcn_feat'].detach()
+        student_score = student_dict['fcn_score'].detach()
+        teacher_feat = teacher_dict['fcn_feat'].detach()
+        teacher_score = teacher_dict['fcn_score'].detach()
+
+        # scores KL divergence
+        student_score_flat = student_score.view(student_score.shape[0], -1)
+        teacher_score_flat = teacher_score.view(teacher_score.shape[0], -1)
+        score_kl = F.kl_div(student_score_flat, teacher_score_flat, size_average=True)
+
+        # pairwise distillation loss
+        W = student_feat.shape[3]
+        H = student_feat.shape[2]
+
+        cs_feat_student = self.cs(student_feat, student_feat)
+        cs_feat_teacher = self.cs(teacher_feat, teacher_feat)
+
+        cs_feat_student_flat = cs_feat_student.view(cs_feat_student.shape[0], -1)
+        cs_feat_teacher_flat = cs_feat_teacher.view(cs_feat_teacher.shape[0], -1)
+
+
+        l2_loss_feat = (1/(W*H)**2) * F.mse_loss(cs_feat_teacher_flat, cs_feat_student_flat, size_average=False, reduce=True)
+
+        cross_entropy_loss = F.cross_entropy(student_score, target, size_average=self.size_average, ignore_index=self.ignore_label)
+
+        loss = cross_entropy_loss + self.lambda*(l2_loss_feat + score_kl)
+
+        return loss
+
+
+
+
+
+
+
 
 class CrossEntropyLoss2d(nn.Module):
 
@@ -138,4 +186,3 @@ class CrossEntropyLoss2d(nn.Module):
 
         loss = F.cross_entropy(predict, target, weight=weight, size_average=self.size_average, ignore_index=self.ignore_label)
         return loss
-
